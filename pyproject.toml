@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllmcode"
+version = "0.1.0"
+description = "Launch Codex, Claude Code, or OpenCode against a running vLLM server"
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = []
+
+[project.scripts]
+vllmcode = "vllmcode.cli:main"
+
+[tool.setuptools]
+packages = ["vllmcode"]
