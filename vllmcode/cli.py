@@ -189,7 +189,7 @@ def validate_flags(client, server, strict=False):
             raise Error(note + " Strict verification requires these fields in /server_info JSON.")
         print(note + " Checking observable reasoning/tool behavior instead.", file=sys.stderr, flush=True)
     else:
-        print("Startup settings verified: " + ", ".join(f"{k}={display(v)}" for k, v in flags.items()), flush=True)
+        print("Startup settings verified: " + ", ".join(f"{k}={display(v)}" for k, v in flags.items()), file=sys.stderr, flush=True)
 
 
 def valid_call(name, arguments):
@@ -214,7 +214,7 @@ def probe(client, server, harness, timeout=60):
         calls = message.get("tool_calls") or []
         if not any(valid_call(c.get("function", {}).get("name"), c.get("function", {}).get("arguments")) for c in calls):
             raise Error("Automatic tool-call probe failed (no valid structured tool call). " + FLAG_HELP)
-        print("Verified: separated reasoning and automatic tool calling.", flush=True)
+        print("Verified: separated reasoning and automatic tool calling.", file=sys.stderr, flush=True)
         # Test tool support in the actual harness protocol, not merely whether
         # an endpoint exists. The dummy tool is never executed.
         if harness == "codex":
@@ -239,7 +239,7 @@ def probe(client, server, harness, timeout=60):
         raise Error(f"{harness} compatibility probe failed: {exc}\n{FLAG_HELP}") from exc
     except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise Error(f"Malformed {harness} compatibility response; server protocol is incompatible.") from exc
-    print(f"Verified: {harness} API tool calling.", flush=True)
+    print(f"Verified: {harness} API tool calling.", file=sys.stderr, flush=True)
 
 
 def output_budget(context, requested=None):
@@ -339,8 +339,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Launch a coding agent against a running vLLM server.")
     parser.add_argument("--version", action="version", version="vllmcode 0.1.0")
     subs = parser.add_subparsers(dest="command", required=True)
-    run = subs.add_parser("run", help="Discover, validate and launch an agent",
-                          epilog="Pass agent arguments after --. Example: vllmcode run codex host -- exec 'Say hello'")
+    run = subs.add_parser("run", help="Discover, validate and launch an interactive or one-shot agent",
+                          formatter_class=argparse.RawDescriptionHelpFormatter,
+                          epilog="One-shot examples (pass agent arguments after --):\n"
+                                 "  vllmcode run codex host -- exec 'Explain this repository'\n"
+                                 "  vllmcode run claude host -- -p 'Explain this repository'\n"
+                                 "  vllmcode run opencode host -- run 'Explain this repository'\n"
+                                 "Launcher status goes to stderr; agent stdout and stdin pass through.")
     run.add_argument("harness", choices=("codex", "claude", "opencode"))
     run.add_argument("server", help="hostname, host:port, or http(s)://host[:port][/prefix][/v1]")
     run.add_argument("--model", help="Choose an advertised model when the server lists multiple models")
@@ -367,15 +372,15 @@ def main(argv=None):
             raise Error(f"{args.harness} is not installed or not on PATH. Install it before running vllmcode.")
         client = Client(key, args.timeout)
         server = discover(client, args.server, args.model)
-        print(f"Server: {display(server.base)}\nModel: {display(server.model)}", flush=True)
+        print(f"Server: {display(server.base)}\nModel: {display(server.model)}", file=sys.stderr, flush=True)
         cmd, env = launch_config(args.harness, server, key, extra, max_output_tokens=args.max_output_tokens)
         if args.harness == "opencode":
             budget = env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"]
-            print(f"Context: {server.context or 'unknown'} tokens; output budget: {budget}; compaction reserve: {budget}.", flush=True)
+            print(f"Context: {server.context or 'unknown'} tokens; output budget: {budget}; compaction reserve: {budget}.", file=sys.stderr, flush=True)
             if not server.context:
                 print("Server did not advertise context length; OpenCode cannot determine when to auto-compact.", file=sys.stderr)
         validate_flags(client, server, args.strict_flags)
-        print("Running small inference probes (no tools are executed) ...", flush=True)
+        print("Running small inference probes (no tools are executed) ...", file=sys.stderr, flush=True)
         probe(client, server, args.harness, args.probe_timeout)
         if args.dry_run:
             print("Command: " + display(shlex.join(cmd)))
@@ -392,7 +397,7 @@ def main(argv=None):
                 print("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=" + env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"])
             print("API key: " + (f"from {args.api_key_env} (redacted)" if key else "not required / placeholder for agent"))
             return 0
-        print(f"Starting {args.harness} ...", flush=True)
+        print(f"Starting {args.harness} ...", file=sys.stderr, flush=True)
         os.execvpe(cmd[0], cmd, env)
     except (Error, OSError) as exc:
         print(f"vllmcode: {exc}", file=sys.stderr)

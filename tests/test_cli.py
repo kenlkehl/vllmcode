@@ -195,21 +195,28 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(len(f.requests), 1)
 
     def test_real_process_handoff(self):
+        prompt = "literal $(echo nope) with spaces"
+        cases = (("codex", ["exec", "--json", prompt]),
+                 ("claude", ["-p", prompt, "--output-format", "json"]),
+                 ("opencode", ["run", prompt, "--format", "json"]))
         with FakeServer() as f, tempfile.TemporaryDirectory() as tmp:
-            harness = Path(tmp, "codex")
-            capture = Path(tmp, "capture.json")
-            harness.write_text(f'#!{sys.executable}\nimport os,sys,json\nfrom pathlib import Path\n'
-                               'Path(os.environ["CAPTURE"]).write_text(json.dumps({"args":sys.argv[1:],"key":os.environ["VLLMCODE_API_KEY"]}))\n'
-                               'sys.exit(7)\n')
-            harness.chmod(0o755)
-            env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], CAPTURE=str(capture), VLLM_API_KEY="")
-            result = subprocess.run([sys.executable, "-m", "vllmcode", "run", "codex", f.base, "--", "exec", "literal $(echo nope)"],
-                                    env=env, capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 7, result.stderr)
-            saved = json.loads(capture.read_text())
-            self.assertEqual(saved["args"][-2:], ["exec", "literal $(echo nope)"])
-            self.assertIn('model="org/model"', saved["args"])
-            self.assertLess(result.stdout.index("Model:"), result.stdout.index("Starting codex"))
+            for name, extra in cases:
+                with self.subTest(harness=name):
+                    harness = Path(tmp, name)
+                    harness.write_text(f'#!{sys.executable}\nimport sys,json\n'
+                                       'print(json.dumps({"args":sys.argv[1:],"stdin":sys.stdin.read()}))\n'
+                                       'sys.exit(7)\n')
+                    harness.chmod(0o755)
+                    env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"], VLLM_API_KEY="",
+                               OPENCODE_CONFIG_CONTENT="{}")
+                    result = subprocess.run([sys.executable, "-m", "vllmcode", "run", name, f.base, "--", *extra],
+                                            env=env, input="piped input\n", capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 7, result.stderr)
+                    # Agent stdout is directly parseable, without launcher diagnostics.
+                    saved = json.loads(result.stdout)
+                    self.assertEqual(saved["args"][-len(extra):], extra)
+                    self.assertEqual(saved["stdin"], "piped input\n")
+                    self.assertLess(result.stderr.index("Model:"), result.stderr.index("Starting " + name))
 
 
 class ConfigurationTests(unittest.TestCase):

@@ -55,6 +55,26 @@ vllmcode run opencode host -- run 'Explain this repository'
 
 Keys go through the child environment, never command-line arguments or configuration files. With no key set, discovery/probes are unauthenticated and harnesses receive a placeholder. Existing cloud credentials are not used as vLLM credentials. Normal harness permissions remain in effect. Explicit harness options after `--` can override launcher settings; avoid supplying conflicting model/provider options unless intentional.
 
+## One-shot terminal commands
+
+The same launcher supports noninteractive invocations. Put launcher options before `--` and the harness's native command and options after it:
+
+```bash
+vllmcode run codex sn4622130540 -- exec 'Explain this repository'
+vllmcode run claude sn4622130540 -- -p 'Explain this repository'
+vllmcode run opencode sn4622130540 -- run 'Explain this repository'
+
+# Capture the harness's native JSON output (the formats differ between harnesses).
+vllmcode run codex host -- exec --json 'Review this code' > events.jsonl
+vllmcode run claude host -- -p 'Review this code' --output-format json > result.json
+vllmcode run opencode host -- run --format json 'Review this code' > events.jsonl
+
+# Combine launcher settings with a one-shot request.
+vllmcode run opencode host --max-output-tokens 65536 -- run 'Explain this repository'
+```
+
+Discovery, model selection, and compatibility checks still run before each invocation. Launcher status (including the model ID) goes to **stderr**, leaving **stdout** for the harness's output. `--dry-run` prints its launch plan to stdout instead. Stdin, the working directory, and the harness's exit code pass through unchanged. Input piping and JSON formatting follow the selected harness's native behavior. One-shot mode does not bypass the harness's permissions or sandbox settings.
+
 ## What is verified
 
 The requested startup settings are interpreted as:
