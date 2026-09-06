@@ -194,6 +194,31 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(exc.exception.status, 302)
             self.assertEqual(len(f.requests), 1)
 
+    def test_effort_cli_reaches_probes_and_launch(self):
+        with FakeServer() as f, patch.dict(os.environ, {"VLLM_API_KEY": "", "OPENCODE_CONFIG_CONTENT": "{}"}):
+            for harness in ("codex", "claude", "opencode"):
+                with self.subTest(harness=harness), patch("shutil.which", return_value="agent"), patch("os.execvpe") as execute:
+                    f.requests.clear()
+                    self.assertEqual(main(["run", harness, f.base, "--effort", "xhigh"]), 0)
+                    bodies = {path: body for path, body, _ in f.requests if body is not None}
+                    self.assertEqual(bodies["/v1/chat/completions"]["reasoning_effort"], "xhigh")
+                    if harness == "codex":
+                        self.assertEqual(bodies["/v1/responses"]["reasoning"], {"effort": "xhigh"})
+                        self.assertIn('model_reasoning_effort="xhigh"', execute.call_args.args[1])
+                    elif harness == "claude":
+                        self.assertEqual(bodies["/v1/messages"]["output_config"], {"effort": "xhigh"})
+                        self.assertEqual(execute.call_args.args[1][-2:], ["--effort", "xhigh"])
+                    else:
+                        cfg = json.loads(execute.call_args.args[2]["OPENCODE_CONFIG_CONTENT"])
+                        self.assertEqual(cfg["provider"]["vllmcode"]["models"]["org/model"]["options"]["reasoningEffort"], "xhigh")
+
+    def test_rejected_server_effort_blocks_launch(self):
+        with patch("shutil.which", return_value="agent"), patch("vllmcode.cli.discover", return_value=Server("http://host/v1", "model")), \
+             patch("vllmcode.cli.validate_flags"), patch("vllmcode.cli.Client.request", side_effect=RequestError("unsupported effort", 400)), \
+             patch("os.execvpe") as execute:
+            self.assertEqual(main(["run", "codex", "host", "--effort", "high"]), 1)
+            execute.assert_not_called()
+
     def test_real_process_handoff(self):
         prompt = "literal $(echo nope) with spaces"
         cases = (("codex", ["exec", "--json", prompt]),
@@ -220,6 +245,26 @@ class IntegrationTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_first_class_effort(self):
+        server = Server("http://host/v1", "model", 262144)
+        cmd, _ = launch_config("codex", server, "", [], {}, effort="xhigh")
+        self.assertIn('model_reasoning_effort="xhigh"', cmd)
+        self.assertIn('model_supports_reasoning_summaries=true', cmd)
+        cmd, _ = launch_config("claude", server, "", [], {}, effort="low")
+        self.assertEqual(cmd[-2:], ["--effort", "low"])
+        _, env = launch_config("opencode", server, "", [], {}, effort="xhigh")
+        model = json.loads(env["OPENCODE_CONFIG_CONTENT"])["provider"]["vllmcode"]["models"]["model"]
+        self.assertEqual(model["options"], {"reasoningEffort": "xhigh"})
+
+    def test_effort_rejections(self):
+        server = Server("http://host/v1", "model")
+        for harness, effort, extra in (("codex", "max", []), ("claude", "minimal", []),
+                                      ("opencode", "invalid", []), ("claude", "low", ["--effort=high"]),
+                                      ("opencode", "low", ["run", "--variant", "high"]),
+                                      ("codex", "low", ["-c", 'model_reasoning_effort="high"'])):
+            with self.subTest(harness=harness, effort=effort), self.assertRaises(Error):
+                launch_config(harness, server, "", extra, {}, effort=effort)
+
     def test_opencode_output_budget_and_reserve(self):
         for context, requested, expected in ((262144, None, 32768), (262144, 65536, 65536),
                                              (32768, None, 8192), (32768, 16384, 16384),

@@ -16,6 +16,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 PORTS = (8000, 8001, 8002, 8020, 8030)
 FLAGS = ("reasoning_parser", "tool_call_parser", "enable_auto_tool_choice")
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 FLAG_HELP = ("Start vLLM with --reasoning-parser <model-specific-parser> "
              "--tool-call-parser <model-specific-parser> --enable-auto-tool-choice.")
 PROBE_FUNCTION = {
@@ -201,10 +202,22 @@ def valid_call(name, arguments):
     return name == "vllmcode_probe" and isinstance(arguments, dict) and arguments.get("answer") == 323
 
 
-def probe(client, server, harness, timeout=60):
+def selected_effort(harness, effort=None):
+    if effort is not None:
+        if effort not in EFFORTS:
+            raise Error("Unknown reasoning effort: " + display(effort))
+        if (harness == "codex" and effort == "max") or (harness == "claude" and effort == "minimal"):
+            raise Error(f"{harness} does not support --effort {effort}; use low, medium, high, or xhigh.")
+    return effort or ("medium" if harness == "claude" else None)
+
+
+def probe(client, server, harness, timeout=60, effort=None):
+    effort = selected_effort(harness, effort)
     body = {"model": server.model, "messages": [{"role": "user", "content": PROBE_PROMPT}],
             "tools": [{"type": "function", "function": PROBE_FUNCTION}],
             "tool_choice": "auto", "max_tokens": 1024, "temperature": 0}
+    if effort:
+        body["reasoning_effort"] = effort
     try:
         reply = client.request(server.base + "/chat/completions", body, timeout)
         message = reply["choices"][0]["message"]
@@ -221,6 +234,8 @@ def probe(client, server, harness, timeout=60):
             body = {"model": server.model, "input": PROBE_PROMPT,
                     "tools": [{"type": "function", **PROBE_FUNCTION}], "tool_choice": "auto",
                     "max_output_tokens": 1024, "store": False, "temperature": 0}
+            if effort:
+                body["reasoning"] = {"effort": effort}
             result = client.request(server.base + "/responses", body, timeout)
             if not any(c.get("type") == "function_call" and valid_call(c.get("name"), c.get("arguments"))
                        for c in result.get("output", [])):
@@ -230,13 +245,14 @@ def probe(client, server, harness, timeout=60):
                     "tools": [{"name": PROBE_FUNCTION["name"], "description": PROBE_FUNCTION["description"],
                                "input_schema": PROBE_FUNCTION["parameters"]}],
                     "tool_choice": {"type": "auto"}, "max_tokens": 1024, "temperature": 0,
-                    "output_config": {"effort": "medium"}}
+                    "output_config": {"effort": effort}}
             result = client.request(server.base + "/messages", body, timeout)
             if not any(c.get("type") == "tool_use" and valid_call(c.get("name"), c.get("input"))
                        for c in result.get("content", [])):
                 raise Error("Anthropic Messages API tool-call probe failed. Update vLLM to a version with /v1/messages support.")
     except RequestError as exc:
-        raise Error(f"{harness} compatibility probe failed: {exc}\n{FLAG_HELP}") from exc
+        hint = f" Check whether this model supports reasoning effort '{effort}'." if effort else ""
+        raise Error(f"{harness} compatibility probe failed:{hint} {exc}\n{FLAG_HELP}") from exc
     except (KeyError, IndexError, TypeError, AttributeError) as exc:
         raise Error(f"Malformed {harness} compatibility response; server protocol is incompatible.") from exc
     print(f"Verified: {harness} API tool calling.", file=sys.stderr, flush=True)
@@ -252,7 +268,15 @@ def output_budget(context, requested=None):
     return min(32768, max(1, context // 4)) if context else 32768
 
 
-def launch_config(harness, server, key, extra, inherited=None, max_output_tokens=None):
+def launch_config(harness, server, key, extra, inherited=None, max_output_tokens=None, effort=None):
+    if effort is not None:
+        # Avoid probing one effort and then launching with an explicit conflicting override.
+        native_flag = {"claude": "--effort", "opencode": "--variant"}.get(harness)
+        if (native_flag and any(x == native_flag or x.startswith(native_flag + "=") for x in extra)) or (
+                harness == "codex" and any("model_reasoning_effort" in x or "model_supports_reasoning_summaries" in x
+                                          for x in extra if "=" in x)):
+            raise Error("Use the launcher --effort without a conflicting native reasoning override after --.")
+    effort = selected_effort(harness, effort)
     if max_output_tokens is not None and harness != "opencode":
         raise Error("--max-output-tokens currently applies only to opencode.")
     env = dict(os.environ if inherited is None else inherited)
@@ -267,6 +291,10 @@ def launch_config(harness, server, key, extra, inherited=None, max_output_tokens
                     "model_providers.vllmcode.requires_openai_auth": False}
         if server.context:
             settings["model_context_window"] = server.context
+        if effort:
+            settings["model_reasoning_effort"] = effort
+            # Unknown model IDs may otherwise omit reasoning metadata altogether.
+            settings["model_supports_reasoning_summaries"] = True
         cmd = ["codex"]
         for k, v in settings.items():
             cmd.extend(["-c", k + "=" + json.dumps(v, ensure_ascii=False)])
@@ -285,7 +313,7 @@ def launch_config(harness, server, key, extra, inherited=None, max_output_tokens
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(server.context)
         # Claude defaults to high; some vLLM models reject high but accept medium.
         # Keep this in sync with the Messages compatibility probe.
-        cmd = ["claude", "--model", model, "--effort", "medium"]
+        cmd = ["claude", "--model", model, "--effort", effort]
     else:
         try:
             config = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
@@ -296,6 +324,8 @@ def launch_config(harness, server, key, extra, inherited=None, max_output_tokens
         budget = output_budget(server.context, max_output_tokens)
         entry = {"name": model, "tool_call": True, "reasoning": True,
                  "limit": {"context": server.context or 0, "output": budget}}
+        if effort:
+            entry["options"] = {"reasoningEffort": effort}
         compaction = config.setdefault("compaction", {})
         if not isinstance(compaction, dict):
             raise Error("Existing OpenCode compaction configuration must be a JSON object.")
@@ -349,6 +379,8 @@ def main(argv=None):
     run.add_argument("harness", choices=("codex", "claude", "opencode"))
     run.add_argument("server", help="hostname, host:port, or http(s)://host[:port][/prefix][/v1]")
     run.add_argument("--model", help="Choose an advertised model when the server lists multiple models")
+    run.add_argument("--effort", choices=EFFORTS,
+                     help="Reasoning effort sent to both probes and the harness (default: medium for Claude; otherwise unchanged). Model support varies.")
     run.add_argument("--max-output-tokens", type=positive_integer,
                      help="OpenCode generation budget, including reasoning (default: 32768, at most 1/4 of known context)")
     run.add_argument("--api-key-env", default="VLLM_API_KEY", help="Environment variable holding the vLLM key")
@@ -363,6 +395,7 @@ def main(argv=None):
         args_list, extra = args_list[:index], args_list[index + 1:]
     args = parser.parse_args(args_list)
     try:
+        effort = selected_effort(args.harness, args.effort)
         if args.max_output_tokens is not None and args.harness != "opencode":
             raise Error("--max-output-tokens currently applies only to opencode.")
         key = os.environ.get(args.api_key_env, "")
@@ -373,7 +406,9 @@ def main(argv=None):
         client = Client(key, args.timeout)
         server = discover(client, args.server, args.model)
         print(f"Server: {display(server.base)}\nModel: {display(server.model)}", file=sys.stderr, flush=True)
-        cmd, env = launch_config(args.harness, server, key, extra, max_output_tokens=args.max_output_tokens)
+        cmd, env = launch_config(args.harness, server, key, extra, max_output_tokens=args.max_output_tokens, effort=args.effort)
+        if effort:
+            print(f"Reasoning effort: {effort}", file=sys.stderr, flush=True)
         if args.harness == "opencode":
             budget = env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"]
             print(f"Context: {server.context or 'unknown'} tokens; output budget: {budget}; compaction reserve: {budget}.", file=sys.stderr, flush=True)
@@ -381,7 +416,7 @@ def main(argv=None):
                 print("Server did not advertise context length; OpenCode cannot determine when to auto-compact.", file=sys.stderr)
         validate_flags(client, server, args.strict_flags)
         print("Running small inference probes (no tools are executed) ...", file=sys.stderr, flush=True)
-        probe(client, server, args.harness, args.probe_timeout)
+        probe(client, server, args.harness, args.probe_timeout, effort=args.effort)
         if args.dry_run:
             print("Command: " + display(shlex.join(cmd)))
             # Only print keys we configure; never dump inherited environment.

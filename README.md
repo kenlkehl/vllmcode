@@ -75,6 +75,22 @@ vllmcode run opencode host --max-output-tokens 65536 -- run 'Explain this reposi
 
 Discovery, model selection, and compatibility checks still run before each invocation. Launcher status (including the model ID) goes to **stderr**, leaving **stdout** for the harness's output. `--dry-run` prints its launch plan to stdout instead. Stdin, the working directory, and the harness's exit code pass through unchanged. Input piping and JSON formatting follow the selected harness's native behavior. One-shot mode does not bypass the harness's permissions or sandbox settings.
 
+## Reasoning effort
+
+Use `--effort` before the `--` separator for interactive or one-shot sessions:
+
+```bash
+vllmcode run codex sn4622130540 --effort xhigh
+vllmcode run claude sn4622130540 --effort low -- -p 'Explain this repository'
+vllmcode run opencode sn4622130540 --effort xhigh --max-output-tokens 65536 -- run 'Review this code'
+```
+
+All three accept `low`, `medium`, `high`, and `xhigh` at the launcher level. Codex and OpenCode also accept `minimal`; Claude and OpenCode also accept `max`. The server/model must support the selected value: the launcher forwards it exactly, without translating `max` to `xhigh` or silently lowering effort. These values are effort hints, not token counts; `--max-output-tokens` independently controls OpenCode's total generation ceiling.
+
+Codex receives `model_reasoning_effort` plus enabled reasoning metadata for custom model IDs. Claude receives `--effort`. OpenCode receives model `options.reasoningEffort`, which its compatible provider sends as `reasoning_effort`. Both the Chat Completions check and the harness-specific probe use the chosen level (`reasoning.effort` for Responses, `output_config.effort` for Messages). A server rejection blocks launch and reports the requested effort. A successful probe establishes request acceptance and tool behavior, not whether a model actually changes its reasoning depth.
+
+Without `--effort`, Claude still uses `medium`; Codex and OpenCode keep their prior configuration/default behavior. Do not combine the first-class option with a native effort override after `--`; the launcher rejects those conflicting overrides. Explicit user/project agent settings or plugins can still alter subsequent requests. Startup diagnostics and the dry-run launch plan show the selected level. Probes remain capped at 1,024 output tokens, so a model that reasons too long can fail the tool-call check even with a valid effort level.
+
 ## What is verified
 
 The requested startup settings are interpreted as:
@@ -111,7 +127,7 @@ This refuses to launch unless all three settings are explicitly exposed in `/ser
 | Claude Code | `/v1/messages` | `ANTHROPIC_BASE_URL` points to the server root, without `/v1`. Main, Opus, Sonnet, Haiku, and subagent model settings point to the discovered model. |
 | OpenCode 1.x | `/v1/chat/completions` | `OPENCODE_CONFIG_CONTENT` adds an `@ai-sdk/openai-compatible` provider. Main and small models use the discovered ID. Only this provider is enabled for the run. |
 
-The server's advertised `max_model_len`, when available, sets the harness context limit. Claude is launched with `--effort medium`, also checked by its probe: its default `high` was rejected by the tested model. Override with `-- --effort <level>` only if your server supports that level. Other user preferences remain available; existing inline OpenCode preferences are merged. Claude cloud-routing environment switches and OAuth overrides are cleared for the child process. Managed policies or explicitly conflicting user/project harness settings can still impose restrictions.
+The server's advertised `max_model_len`, when available, sets the harness context limit. Claude defaults to `medium`, also checked by its probe: its native default `high` was rejected by the tested model. Use the launcher `--effort <level>` to choose another supported value. Other user preferences remain available; existing inline OpenCode preferences are merged. Claude cloud-routing environment switches and OAuth overrides are cleared for the child process. Managed policies or explicitly conflicting user/project harness settings can still impose restrictions.
 
 Codex needs vLLM Responses API support; Claude needs Anthropic Messages API support. There is no translating proxy. OpenCode configuration targets its current stable 1.x schema, not the separate v2 preview schema.
 
