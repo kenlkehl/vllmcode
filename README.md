@@ -91,6 +91,25 @@ Codex receives `model_reasoning_effort` plus enabled reasoning metadata for cust
 
 Without `--effort`, Claude still uses `medium`; Codex and OpenCode keep their prior configuration/default behavior. Do not combine the first-class option with a native effort override after `--`; the launcher rejects those conflicting overrides. Explicit user/project agent settings or plugins can still alter subsequent requests. Startup diagnostics and the dry-run launch plan show the selected level. Probes remain capped at 1,024 output tokens, so a model that reasons too long can fail the tool-call check even with a valid effort level.
 
+## Codex automatic approval review (experimental)
+
+```bash
+vllmcode run codex sn4622130540 --auto-review --effort xhigh
+vllmcode run codex sn4622130540 --auto-review --effort xhigh -- exec 'Fix the failing tests'
+```
+
+Requires **Codex CLI 0.153.4 or newer**; 0.153.4 is the version tested. `--auto-review` enables Codex's native `approvals_reviewer="auto_review"`, `approval_policy="on-request"`, and `sandbox_mode="workspace-write"`. Eligible approval requests go to a separate Codex reviewer session using the **same vLLM endpoint, API key, and detected model**. Codex retains its review policy, sandbox enforcement, and decision/error handling. Actions permitted inside the sandbox do not necessarily need a review. This is permission review, distinct from `codex review` code review.
+
+Codex selects its review model separately from its coding model. The launcher supplies a packaged, authoritative model catalog containing only a hidden, non-API placeholder. This excludes bundled/cached hosted reviewer models and makes Codex use its built-in fallback metadata and instructions for the active vLLM model, including reviewer selection. Codex requires a nonempty catalog, so the placeholder is necessary; it is never an inference model. The reserved ID `vllmcode-catalog-placeholder` cannot be used with this option. No global configuration or catalog files are edited. Codex may print its usual warning about fallback model metadata.
+
+With this fallback metadata, an explicit launcher `--effort` also reaches the reviewer. Without it, Codex's effective effort/default applies. The detected context override is retained because the coding and review model IDs match. Explicit native model, provider, sandbox, or approval overrides that conflict with this mode are rejected. Use the launcher option instead of relying on native `--approve-for-me` alone to configure local reviewer selection. Existing managed restrictions still apply.
+
+This integration depends on Codex's reviewer-selection behavior and may need adjustment for future releases. Startup checks verify version and inference/tool compatibility; they do **not** test a real approval on every launch or establish a model's ability to make sound permission decisions. Reviewer quality depends on your model. Claude and OpenCode are not supported by `--auto-review`. Without this flag, the launcher leaves approval settings unchanged.
+
+Implementation follows the [official OpenAI documentation for auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review) and the installed Codex version's native behavior.
+
+Live validation on `sn4622130540:8000` with `Inferact/Qwen3.8-27B-NVFP4` and Codex 0.153.4 captured an actual Guardian request at the same `/v1/responses` endpoint, with the detected model ID, native review JSON schema, and `xhigh` effort. An explicitly escalated `pwd` command ran after review. In a second test, injected HTTP 503 responses for Guardian requests caused Codex to decline the command without executing it. **Codex exec still returned 0 after reporting the refusal**: automation that needs to detect declined actions should inspect `--json` events (`command_execution` status `declined`), not just the process exit code. These are routing and failure-handling tests, not a reviewer-quality evaluation.
+
 ## What is verified
 
 The requested startup settings are interpreted as:

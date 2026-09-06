@@ -219,6 +219,19 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(main(["run", "codex", "host", "--effort", "high"]), 1)
             execute.assert_not_called()
 
+    def test_auto_review_cli_and_failed_probe(self):
+        with FakeServer() as f, patch.dict(os.environ, {"VLLM_API_KEY": ""}), \
+             patch("shutil.which", return_value="codex"), \
+             patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "codex-cli 0.153.4", "")), \
+             patch("os.execvpe") as execute:
+            self.assertEqual(main(["run", "codex", f.base, "--auto-review", "--", "exec", "hello"]), 0)
+            self.assertIn('approvals_reviewer="auto_review"', execute.call_args.args[1])
+            self.assertEqual(execute.call_args.args[1][-2:], ["exec", "hello"])
+            execute.reset_mock()
+            f.call = False
+            self.assertEqual(main(["run", "codex", f.base, "--auto-review"]), 1)
+            execute.assert_not_called()
+
     def test_real_process_handoff(self):
         prompt = "literal $(echo nope) with spaces"
         cases = (("codex", ["exec", "--json", prompt]),
@@ -245,6 +258,45 @@ class IntegrationTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_codex_auto_review_routing(self):
+        server = Server("https://host/v1", "org/model", 262144)
+        cmd, env = launch_config("codex", server, "secret", ["exec", "--json", "Explain this repository"], {},
+                                 effort="xhigh", auto_review=True)
+        self.assertIn('approval_policy="on-request"', cmd)
+        self.assertIn('approvals_reviewer="auto_review"', cmd)
+        self.assertIn('sandbox_mode="workspace-write"', cmd)
+        self.assertIn('model="org/model"', cmd)
+        self.assertIn('model_providers.vllmcode.base_url="https://host/v1"', cmd)
+        path = json.loads(next(x.split("=", 1)[1] for x in cmd if x.startswith("model_catalog_json=")))
+        catalog = json.loads(Path(path).read_text())
+        self.assertTrue(catalog["models"])
+        self.assertTrue(all(not m["supported_in_api"] and m["visibility"] == "none" for m in catalog["models"]))
+        self.assertNotIn("secret", " ".join(cmd))
+        self.assertEqual(env["VLLMCODE_API_KEY"], "secret")
+        normal, _ = launch_config("codex", server, "", [], {})
+        self.assertFalse(any(x.startswith(("approval_policy=", "approvals_reviewer=", "model_catalog_json=")) for x in normal))
+
+    def test_auto_review_rejects_conflicting_routing_and_permissions(self):
+        for extra in (["--yolo"], ["exec", "-s", "danger-full-access"], ["-melsewhere"],
+                      ["--config=approval_policy='never'"], ["-c", 'model_provider="openai"'],
+                      ["-cmodel_catalog_json='/tmp/models.json'"], ["--remote=ws://host"],
+                      ["--config", 'permissions.foo.bar=true']):
+            with self.subTest(extra=extra), self.assertRaises(Error):
+                launch_config("codex", Server("http://host/v1", "model"), "", extra, {}, auto_review=True)
+        for harness in ("claude", "opencode"):
+            with self.assertRaises(Error):
+                launch_config(harness, Server("http://host/v1", "model"), "", [], {}, auto_review=True)
+        # A prompt mentioning config keys is not itself an override.
+        launch_config("codex", Server("http://host/v1", "model"), "", ["exec", "Explain approval_policy=never"], {}, auto_review=True)
+
+    def test_auto_review_version_check_blocks_before_network(self):
+        for version in ("codex-cli 0.152.0", "unexpected version"):
+            with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, version, "")), \
+                 patch("vllmcode.cli.discover") as discover_mock, patch("os.execvpe") as execute:
+                self.assertEqual(main(["run", "codex", "host", "--auto-review"]), 1)
+                discover_mock.assert_not_called()
+                execute.assert_not_called()
+
     def test_first_class_effort(self):
         server = Server("http://host/v1", "model", 262144)
         cmd, _ = launch_config("codex", server, "", [], {}, effort="xhigh")

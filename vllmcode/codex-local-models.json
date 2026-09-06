@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "slug": "vllmcode-catalog-placeholder",
+      "display_name": "vllmcode internal placeholder",
+      "supported_reasoning_levels": [],
+      "shell_type": "unified_exec",
+      "visibility": "none",
+      "supported_in_api": false,
+      "priority": 99,
+      "support_verbosity": false,
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "experimental_supported_tools": [],
+      "model_messages": {
+        "instructions_template": "Internal catalog placeholder; not an inference model."
+      }
+    }
+  ]
+}

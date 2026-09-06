@@ -4,10 +4,13 @@ import argparse
 import json
 import math
 import os
+from pathlib import Path
+import re
 import shlex
 import shutil
 import socket
 import ssl
+import subprocess
 import sys
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
@@ -268,7 +271,41 @@ def output_budget(context, requested=None):
     return min(32768, max(1, context // 4)) if context else 32768
 
 
-def launch_config(harness, server, key, extra, inherited=None, max_output_tokens=None, effort=None):
+def validate_auto_review(harness, extra):
+    if harness != "codex":
+        raise Error("--auto-review currently applies only to codex.")
+    # Inspect option tokens only, not words inside the user's prompt.
+    protected = {"approval_policy", "approvals_reviewer", "sandbox_mode", "permissions",
+                 "default_permissions", "model", "model_provider", "model_providers", "model_catalog_json"}
+    forbidden = {"--yolo", "--dangerously-bypass-approvals-and-sandbox", "--full-auto",
+                 "--ask-for-approval", "-a", "--sandbox", "-s", "--model", "-m",
+                 "--oss", "--local-provider", "--remote"}
+    for i, arg in enumerate(extra):
+        if arg == "--":
+            break
+        if arg.split("=", 1)[0] in forbidden or (arg.startswith(("-m", "-s", "-a")) and not arg.startswith("--")):
+            raise Error("--auto-review cannot be combined with native model, provider, sandbox, or approval overrides.")
+        value = None
+        if arg in ("-c", "--config") and i + 1 < len(extra):
+            value = extra[i + 1]
+        elif arg.startswith("--config="):
+            value = arg[len("--config="):]
+        elif arg.startswith("-c") and not arg.startswith("--"):
+            value = arg[2:]
+        if value and value.split("=", 1)[0].strip().split(".", 1)[0].strip('"\'') in protected:
+            raise Error("--auto-review manages model routing and permissions; remove the conflicting native -c override.")
+
+
+def check_codex_auto_review_version():
+    result = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=10)
+    match = re.search(r"codex-cli (\d+)\.(\d+)\.(\d+)", result.stdout)
+    if result.returncode or not match or tuple(map(int, match.groups())) < (0, 153, 4):
+        raise Error("--auto-review requires Codex CLI 0.153.4 or newer (the first version tested by vllmcode).")
+
+
+def launch_config(harness, server, key, extra, inherited=None, max_output_tokens=None, effort=None, auto_review=False):
+    if auto_review:
+        validate_auto_review(harness, extra)
     if effort is not None:
         # Avoid probing one effort and then launching with an explicit conflicting override.
         native_flag = {"claude": "--effort", "opencode": "--variant"}.get(harness)
@@ -282,6 +319,8 @@ def launch_config(harness, server, key, extra, inherited=None, max_output_tokens
     env = dict(os.environ if inherited is None else inherited)
     env["VLLMCODE_API_KEY"] = key or "vllmcode-no-key"
     model = server.model
+    if auto_review and model == "vllmcode-catalog-placeholder":
+        raise Error("This model ID is reserved by the local Codex catalog; use a different vLLM served model name.")
     if harness == "codex":
         settings = {"model_provider": "vllmcode", "model": model,
                     "model_providers.vllmcode.name": "vLLM",
@@ -291,6 +330,15 @@ def launch_config(harness, server, key, extra, inherited=None, max_output_tokens
                     "model_providers.vllmcode.requires_openai_auth": False}
         if server.context:
             settings["model_context_window"] = server.context
+        if auto_review:
+            # An authoritative placeholder catalog keeps Codex's built-in fallback
+            # metadata/instructions, and makes Guardian fall back to the active
+            # model instead of choosing a bundled/cached OpenAI reviewer model.
+            # Codex rejects empty catalogs; the placeholder is hidden and not
+            # API eligible, so it cannot be selected as a reviewer preset.
+            settings.update({"approval_policy": "on-request", "approvals_reviewer": "auto_review",
+                             "sandbox_mode": "workspace-write",
+                             "model_catalog_json": str(Path(__file__).with_name("codex-local-models.json").resolve())})
         if effort:
             settings["model_reasoning_effort"] = effort
             # Unknown model IDs may otherwise omit reasoning metadata altogether.
@@ -379,6 +427,8 @@ def main(argv=None):
     run.add_argument("harness", choices=("codex", "claude", "opencode"))
     run.add_argument("server", help="hostname, host:port, or http(s)://host[:port][/prefix][/v1]")
     run.add_argument("--model", help="Choose an advertised model when the server lists multiple models")
+    run.add_argument("--auto-review", action="store_true",
+                     help="Codex only: use the local model for native approval review with workspace-write sandbox (experimental; requires Codex >=0.153.4)")
     run.add_argument("--effort", choices=EFFORTS,
                      help="Reasoning effort sent to both probes and the harness (default: medium for Claude; otherwise unchanged). Model support varies.")
     run.add_argument("--max-output-tokens", type=positive_integer,
@@ -395,6 +445,9 @@ def main(argv=None):
         args_list, extra = args_list[:index], args_list[index + 1:]
     args = parser.parse_args(args_list)
     try:
+        if args.auto_review:
+            validate_auto_review(args.harness, extra)
+            check_codex_auto_review_version()
         effort = selected_effort(args.harness, args.effort)
         if args.max_output_tokens is not None and args.harness != "opencode":
             raise Error("--max-output-tokens currently applies only to opencode.")
@@ -406,7 +459,10 @@ def main(argv=None):
         client = Client(key, args.timeout)
         server = discover(client, args.server, args.model)
         print(f"Server: {display(server.base)}\nModel: {display(server.model)}", file=sys.stderr, flush=True)
-        cmd, env = launch_config(args.harness, server, key, extra, max_output_tokens=args.max_output_tokens, effort=args.effort)
+        cmd, env = launch_config(args.harness, server, key, extra, max_output_tokens=args.max_output_tokens, effort=args.effort, auto_review=args.auto_review)
+        if args.auto_review:
+            print(f"Auto-review: {display(server.model)} at {display(server.base)} (experimental); workspace-write sandbox.\n"
+                  "Codex controls review decisions and failure handling; reviewer quality depends on this model.", file=sys.stderr, flush=True)
         if effort:
             print(f"Reasoning effort: {effort}", file=sys.stderr, flush=True)
         if args.harness == "opencode":
@@ -434,7 +490,7 @@ def main(argv=None):
             return 0
         print(f"Starting {args.harness} ...", file=sys.stderr, flush=True)
         os.execvpe(cmd[0], cmd, env)
-    except (Error, OSError) as exc:
+    except (Error, OSError, subprocess.TimeoutExpired) as exc:
         print(f"vllmcode: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
