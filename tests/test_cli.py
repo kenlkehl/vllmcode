@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -64,6 +65,19 @@ class FakeServer:
                     return
                 else:
                     status, result = 404, {"error": "Not found"}
+                if body and body.get("stream") and status == 200:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    chunks = [
+                        {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "fixture reply"}, "finish_reason": None}]},
+                        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}},
+                    ]
+                    for chunk in chunks:
+                        self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    return
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -151,7 +165,7 @@ class IntegrationTests(unittest.TestCase):
         with FakeServer() as f:
             s = discover(Client(), f.base)
             validate_flags(Client(), s, strict=True)
-            for harness in ("codex", "claude", "opencode"):
+            for harness in ("codex", "claude", "opencode", "pi"):
                 probe(Client(), s, harness)
             f.flags["enable_auto_tool_choice"] = False
             with self.assertRaisesRegex(Error, "disabled"):
@@ -187,6 +201,22 @@ class IntegrationTests(unittest.TestCase):
             self.assertIn("org/model", stream.getvalue())
             execv.assert_not_called()
 
+    def test_pi_dry_run_and_failed_probe(self):
+        with FakeServer() as f, patch.dict(os.environ, {"VLLM_API_KEY": "pi-secret"}), patch("os.execvpe") as execute:
+            f.key = "pi-secret"
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                self.assertEqual(main(["run", "pi", f.base, "--dry-run"]), 0)
+            self.assertIn("Pi provider:", stream.getvalue())
+            self.assertNotIn("pi-secret", stream.getvalue())
+            body = next(body for path, body, _ in f.requests if path == "/v1/chat/completions")
+            self.assertEqual(body["reasoning_effort"], "medium")
+            execute.assert_not_called()
+            f.call = False
+            with patch("shutil.which", return_value="pi"):
+                self.assertEqual(main(["run", "pi", f.base]), 1)
+            execute.assert_not_called()
+
     def test_redirects_are_not_followed(self):
         with FakeServer() as f:
             with self.assertRaises(RequestError) as exc:
@@ -196,7 +226,7 @@ class IntegrationTests(unittest.TestCase):
 
     def test_effort_cli_reaches_probes_and_launch(self):
         with FakeServer() as f, patch.dict(os.environ, {"VLLM_API_KEY": "", "OPENCODE_CONFIG_CONTENT": "{}"}):
-            for harness in ("codex", "claude", "opencode"):
+            for harness in ("codex", "claude", "opencode", "pi"):
                 with self.subTest(harness=harness), patch("shutil.which", return_value="agent"), patch("os.execvpe") as execute:
                     f.requests.clear()
                     self.assertEqual(main(["run", harness, f.base, "--effort", "xhigh"]), 0)
@@ -208,6 +238,8 @@ class IntegrationTests(unittest.TestCase):
                     elif harness == "claude":
                         self.assertEqual(bodies["/v1/messages"]["output_config"], {"effort": "xhigh"})
                         self.assertEqual(execute.call_args.args[1][-2:], ["--effort", "xhigh"])
+                    elif harness == "pi":
+                        self.assertEqual(execute.call_args.args[1][-2:], ["--thinking", "xhigh"])
                     else:
                         cfg = json.loads(execute.call_args.args[2]["OPENCODE_CONFIG_CONTENT"])
                         self.assertEqual(cfg["provider"]["vllmcode"]["models"]["org/model"]["options"]["reasoningEffort"], "xhigh")
@@ -232,11 +264,36 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(main(["run", "codex", f.base, "--auto-review"]), 1)
             execute.assert_not_called()
 
+    @unittest.skipUnless(shutil.which("pi"), "Pi CLI is not installed")
+    def test_installed_pi_extension_streaming(self):
+        with FakeServer() as f, tempfile.TemporaryDirectory() as tmp:
+            f.key = "pi-fixture-secret"
+            env = dict(os.environ, PI_CODING_AGENT_DIR=tmp, PI_OFFLINE="1", VLLM_API_KEY=f.key)
+            result = subprocess.run(
+                [sys.executable, "-m", "vllmcode", "run", "pi", f.base,
+                 "--effort", "xhigh", "--max-output-tokens", "4096", "--",
+                 "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
+                 "--no-context-files", "--no-session", "--no-tools", "-p", "Say hello"],
+                env=env, cwd=Path(__file__).resolve().parents[1],
+                input="", capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("fixture reply", result.stdout)
+            streamed = [(body, auth) for _, body, auth in f.requests if body and body.get("stream")]
+            self.assertTrue(streamed, result.stderr)
+            body, auth = streamed[-1]
+            self.assertEqual(auth, "Bearer " + f.key)
+            self.assertEqual(body["model"], "org/model")
+            self.assertEqual(body["reasoning_effort"], "xhigh")
+            self.assertEqual(body["max_tokens"], 4096)
+            self.assertEqual(body["messages"][0]["role"], "system")
+            self.assertFalse(Path(tmp, "models.json").exists())
+
     def test_real_process_handoff(self):
         prompt = "literal $(echo nope) with spaces"
         cases = (("codex", ["exec", "--json", prompt]),
                  ("claude", ["-p", prompt, "--output-format", "json"]),
-                 ("opencode", ["run", prompt, "--format", "json"]))
+                 ("opencode", ["run", prompt, "--format", "json"]),
+                 ("pi", ["-p", prompt, "--mode", "json"]))
         with FakeServer() as f, tempfile.TemporaryDirectory() as tmp:
             for name, extra in cases:
                 with self.subTest(harness=name):
@@ -258,6 +315,28 @@ class IntegrationTests(unittest.TestCase):
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_pi_provider_and_preferences(self):
+        original = {"PI_CODING_AGENT_DIR": "/custom/pi", "VLLMCODE_PI_CONFIG": "stale"}
+        cmd, env = launch_config("pi", Server("https://host/proxy/v1", 'org/model"name', 65536),
+                                 "secret", ["-p", "hello"], original, effort="max", max_output_tokens=12000)
+        config = json.loads(env["VLLMCODE_PI_CONFIG"])
+        self.assertEqual(config["baseUrl"], "https://host/proxy/v1")
+        self.assertEqual(config["api"], "openai-completions")
+        model = config["models"][0]
+        self.assertEqual(model["id"], 'org/model"name')
+        self.assertEqual((model["contextWindow"], model["maxTokens"]), (65536, 12000))
+        self.assertEqual(model["thinkingLevelMap"]["max"], "max")
+        self.assertEqual(cmd[-4:], ["--thinking", "max", "-p", "hello"])
+        self.assertTrue(Path(cmd[2]).is_file())
+        self.assertEqual(env["PI_CODING_AGENT_DIR"], "/custom/pi")
+        self.assertEqual(original["VLLMCODE_PI_CONFIG"], "stale")
+        self.assertNotIn("secret", env["VLLMCODE_PI_CONFIG"])
+        self.assertNotIn("secret", " ".join(cmd))
+        self.assertEqual(env["VLLMCODE_API_KEY"], "secret")
+        _, fallback = launch_config("pi", Server("http://host/v1", "model"), "", [], {})
+        model = json.loads(fallback["VLLMCODE_PI_CONFIG"])["models"][0]
+        self.assertEqual((model["contextWindow"], model["maxTokens"]), (32768, 8192))
+
     def test_codex_auto_review_routing(self):
         server = Server("https://host/v1", "org/model", 262144)
         cmd, env = launch_config("codex", server, "secret", ["exec", "--json", "Explain this repository"], {},
@@ -310,7 +389,7 @@ class ConfigurationTests(unittest.TestCase):
 
     def test_effort_rejections(self):
         server = Server("http://host/v1", "model")
-        for harness, effort, extra in (("codex", "max", []), ("claude", "minimal", []),
+        for harness, effort, extra in (("pi", "low", ["--thinking=high"]), ("codex", "max", []), ("claude", "minimal", []),
                                       ("opencode", "invalid", []), ("claude", "low", ["--effort=high"]),
                                       ("opencode", "low", ["run", "--variant", "high"]),
                                       ("codex", "low", ["-c", 'model_reasoning_effort="high"'])):

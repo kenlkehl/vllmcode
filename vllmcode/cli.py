@@ -211,7 +211,7 @@ def selected_effort(harness, effort=None):
             raise Error("Unknown reasoning effort: " + display(effort))
         if (harness == "codex" and effort == "max") or (harness == "claude" and effort == "minimal"):
             raise Error(f"{harness} does not support --effort {effort}; use low, medium, high, or xhigh.")
-    return effort or ("medium" if harness == "claude" else None)
+    return effort or ("medium" if harness in ("claude", "pi") else None)
 
 
 def probe(client, server, harness, timeout=60, effort=None):
@@ -308,14 +308,14 @@ def launch_config(harness, server, key, extra, inherited=None, max_output_tokens
         validate_auto_review(harness, extra)
     if effort is not None:
         # Avoid probing one effort and then launching with an explicit conflicting override.
-        native_flag = {"claude": "--effort", "opencode": "--variant"}.get(harness)
+        native_flag = {"claude": "--effort", "opencode": "--variant", "pi": "--thinking"}.get(harness)
         if (native_flag and any(x == native_flag or x.startswith(native_flag + "=") for x in extra)) or (
                 harness == "codex" and any("model_reasoning_effort" in x or "model_supports_reasoning_summaries" in x
                                           for x in extra if "=" in x)):
             raise Error("Use the launcher --effort without a conflicting native reasoning override after --.")
     effort = selected_effort(harness, effort)
-    if max_output_tokens is not None and harness != "opencode":
-        raise Error("--max-output-tokens currently applies only to opencode.")
+    if max_output_tokens is not None and harness not in ("opencode", "pi"):
+        raise Error("--max-output-tokens currently applies only to opencode and pi.")
     env = dict(os.environ if inherited is None else inherited)
     env["VLLMCODE_API_KEY"] = key or "vllmcode-no-key"
     model = server.model
@@ -362,6 +362,19 @@ def launch_config(harness, server, key, extra, inherited=None, max_output_tokens
         # Claude defaults to high; some vLLM models reject high but accept medium.
         # Keep this in sync with the Messages compatibility probe.
         cmd = ["claude", "--model", model, "--effort", effort]
+    elif harness == "pi":
+        context = server.context or 32768
+        entry = {"id": model, "name": model, "reasoning": True, "input": ["text"],
+                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+                 "contextWindow": context, "maxTokens": output_budget(context, max_output_tokens),
+                 "thinkingLevelMap": {level: level for level in EFFORTS},
+                 "compat": {"supportsDeveloperRole": False, "supportsStore": False,
+                            "supportsReasoningEffort": True, "maxTokensField": "max_tokens"}}
+        env["VLLMCODE_PI_CONFIG"] = json.dumps({
+            "baseUrl": server.base, "api": "openai-completions",
+            "apiKey": "$VLLMCODE_API_KEY", "models": [entry]}, ensure_ascii=False)
+        cmd = ["pi", "--extension", str(Path(__file__).with_name("pi-provider.mjs").resolve()),
+               "--provider", "vllmcode", "--model", model, "--thinking", effort]
     else:
         try:
             config = json.loads(env.get("OPENCODE_CONFIG_CONTENT") or "{}")
@@ -423,16 +436,17 @@ def main(argv=None):
                                  "  vllmcode run codex host -- exec 'Explain this repository'\n"
                                  "  vllmcode run claude host -- -p 'Explain this repository'\n"
                                  "  vllmcode run opencode host -- run 'Explain this repository'\n"
+                                 "  vllmcode run pi host -- -p 'Explain this repository'\n"
                                  "Launcher status goes to stderr; agent stdout and stdin pass through.")
-    run.add_argument("harness", choices=("codex", "claude", "opencode"))
+    run.add_argument("harness", choices=("codex", "claude", "opencode", "pi"))
     run.add_argument("server", help="hostname, host:port, or http(s)://host[:port][/prefix][/v1]")
     run.add_argument("--model", help="Choose an advertised model when the server lists multiple models")
     run.add_argument("--auto-review", action="store_true",
                      help="Codex only: use the local model for native approval review with workspace-write sandbox (experimental; requires Codex >=0.153.4)")
     run.add_argument("--effort", choices=EFFORTS,
-                     help="Reasoning effort sent to both probes and the harness (default: medium for Claude; otherwise unchanged). Model support varies.")
+                     help="Reasoning effort sent to both probes and the harness (default: medium for Claude and Pi; otherwise unchanged). Model support varies.")
     run.add_argument("--max-output-tokens", type=positive_integer,
-                     help="OpenCode generation budget, including reasoning (default: 32768, at most 1/4 of known context)")
+                     help="OpenCode/Pi generation budget, including reasoning (default: 32768, at most 1/4 of known context)")
     run.add_argument("--api-key-env", default="VLLM_API_KEY", help="Environment variable holding the vLLM key")
     run.add_argument("--timeout", type=positive, default=3, help="Seconds per discovery request (default: 3)")
     run.add_argument("--probe-timeout", type=positive, default=60, help="Seconds per inference probe (default: 60)")
@@ -449,8 +463,8 @@ def main(argv=None):
             validate_auto_review(args.harness, extra)
             check_codex_auto_review_version()
         effort = selected_effort(args.harness, args.effort)
-        if args.max_output_tokens is not None and args.harness != "opencode":
-            raise Error("--max-output-tokens currently applies only to opencode.")
+        if args.max_output_tokens is not None and args.harness not in ("opencode", "pi"):
+            raise Error("--max-output-tokens currently applies only to opencode and pi.")
         key = os.environ.get(args.api_key_env, "")
         if args.api_key_env != "VLLM_API_KEY" and not key:
             raise Error(f"Environment variable {args.api_key_env} is empty or unset.")
@@ -470,6 +484,11 @@ def main(argv=None):
             print(f"Context: {server.context or 'unknown'} tokens; output budget: {budget}; compaction reserve: {budget}.", file=sys.stderr, flush=True)
             if not server.context:
                 print("Server did not advertise context length; OpenCode cannot determine when to auto-compact.", file=sys.stderr)
+        if args.harness == "pi":
+            entry = json.loads(env["VLLMCODE_PI_CONFIG"])["models"][0]
+            print(f"Context: {entry['contextWindow']} tokens; output budget: {entry['maxTokens']}.", file=sys.stderr, flush=True)
+            if not server.context:
+                print("Server did not advertise context length; Pi uses a 32768-token fallback.", file=sys.stderr)
         validate_flags(client, server, args.strict_flags)
         print("Running small inference probes (no tools are executed) ...", file=sys.stderr, flush=True)
         probe(client, server, args.harness, args.probe_timeout, effort=args.effort)
@@ -486,6 +505,8 @@ def main(argv=None):
                 print("OpenCode provider: " + display(json.dumps(config["provider"]["vllmcode"])))
                 print("OpenCode compaction: " + display(json.dumps(config["compaction"])))
                 print("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=" + env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"])
+            elif args.harness == "pi":
+                print("Pi provider: " + display(env["VLLMCODE_PI_CONFIG"]))
             print("API key: " + (f"from {args.api_key_env} (redacted)" if key else "not required / placeholder for agent"))
             return 0
         print(f"Starting {args.harness} ...", file=sys.stderr, flush=True)

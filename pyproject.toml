@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vllmcode"
 version = "0.1.0"
-description = "Launch Codex, Claude Code, or OpenCode against a running vLLM server"
+description = "Launch Codex, Claude Code, OpenCode, or Pi against a running vLLM server"
 requires-python = ">=3.10"
 readme = "README.md"
 dependencies = []
@@ -17,4 +17,4 @@ vllmcode = "vllmcode.cli:main"
 packages = ["vllmcode"]
 
 [tool.setuptools.package-data]
-vllmcode = ["codex-local-models.json"]
+vllmcode = ["codex-local-models.json", "pi-provider.mjs"]
