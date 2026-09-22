@@ -5,7 +5,7 @@ Launch Codex, Claude Code, OpenCode, or Pi against an **already running, reachab
 ```bash
 pipx install .
 # Or: uv tool install .
-# Or, without installing: ./bin/vllmcode run codex sn4622130540
+# Or, without installing: ./bin/vllmcode run codex yourserverip
 
 vllmcode run codex yourserverip
 vllmcode run claude http://yourserverip:8000/v1
@@ -62,10 +62,10 @@ Keys go through the child environment, never command-line arguments or configura
 The same launcher supports noninteractive invocations. Put launcher options before `--` and the harness's native command and options after it:
 
 ```bash
-vllmcode run codex sn4622130540 -- exec 'Explain this repository'
-vllmcode run claude sn4622130540 -- -p 'Explain this repository'
-vllmcode run opencode sn4622130540 -- run 'Explain this repository'
-vllmcode run pi sn4622130540 -- -p 'Explain this repository'
+vllmcode run codex yourserverip -- exec 'Explain this repository'
+vllmcode run claude yourserverip -- -p 'Explain this repository'
+vllmcode run opencode yourserverip -- run 'Explain this repository'
+vllmcode run pi yourserverip -- -p 'Explain this repository'
 
 # Capture the harness's native JSON output (the formats differ between harnesses).
 vllmcode run codex host -- exec --json 'Review this code' > events.jsonl
@@ -84,9 +84,9 @@ Discovery, model selection, and compatibility checks still run before each invoc
 Use `--effort` before the `--` separator for interactive or one-shot sessions:
 
 ```bash
-vllmcode run codex sn4622130540 --effort xhigh
-vllmcode run claude sn4622130540 --effort low -- -p 'Explain this repository'
-vllmcode run opencode sn4622130540 --effort xhigh --max-output-tokens 65536 -- run 'Review this code'
+vllmcode run codex yourserverip --effort xhigh
+vllmcode run claude yourserverip --effort low -- -p 'Explain this repository'
+vllmcode run opencode yourserverip --effort xhigh --max-output-tokens 65536 -- run 'Review this code'
 ```
 
 All four accept `low`, `medium`, `high`, and `xhigh` at the launcher level. Codex, OpenCode, and Pi also accept `minimal`; Claude, OpenCode, and Pi also accept `max`. The server/model must support the selected value: the launcher forwards it exactly, without translating `max` to `xhigh` or silently lowering effort. These values are effort hints, not token counts; `--max-output-tokens` independently controls OpenCode's and Pi's total generation ceiling.
@@ -98,8 +98,8 @@ Without `--effort`, Claude still uses `medium`; Codex and OpenCode keep their pr
 ## Codex automatic approval review (experimental)
 
 ```bash
-vllmcode run codex sn4622130540 --auto-review --effort xhigh
-vllmcode run codex sn4622130540 --auto-review --effort xhigh -- exec 'Fix the failing tests'
+vllmcode run codex yourserverip --auto-review --effort xhigh
+vllmcode run codex yourserverip --auto-review --effort xhigh -- exec 'Fix the failing tests'
 ```
 
 Requires **Codex CLI 0.153.4 or newer**; 0.153.4 is the version tested. `--auto-review` enables Codex's native `approvals_reviewer="auto_review"`, `approval_policy="on-request"`, and `sandbox_mode="workspace-write"`. Eligible approval requests go to a separate Codex reviewer session using the **same vLLM endpoint, API key, and detected model**. Codex retains its review policy, sandbox enforcement, and decision/error handling. Actions permitted inside the sandbox do not necessarily need a review. This is permission review, distinct from `codex review` code review.
@@ -112,7 +112,7 @@ This integration depends on Codex's reviewer-selection behavior and may need adj
 
 Implementation follows the [official OpenAI documentation for auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review) and the installed Codex version's native behavior.
 
-Live validation on `sn4622130540:8000` with `Inferact/Qwen3.8-27B-NVFP4` and Codex 0.153.4 captured an actual Guardian request at the same `/v1/responses` endpoint, with the detected model ID, native review JSON schema, and `xhigh` effort. An explicitly escalated `pwd` command ran after review. In a second test, injected HTTP 503 responses for Guardian requests caused Codex to decline the command without executing it. **Codex exec still returned 0 after reporting the refusal**: automation that needs to detect declined actions should inspect `--json` events (`command_execution` status `declined`), not just the process exit code. These are routing and failure-handling tests, not a reviewer-quality evaluation.
+Live validation on `yourserverip:8000` with `Inferact/Qwen3.8-27B-NVFP4` and Codex 0.153.4 captured an actual Guardian request at the same `/v1/responses` endpoint, with the detected model ID, native review JSON schema, and `xhigh` effort. An explicitly escalated `pwd` command ran after review. In a second test, injected HTTP 503 responses for Guardian requests caused Codex to decline the command without executing it. **Codex exec still returned 0 after reporting the refusal**: automation that needs to detect declined actions should inspect `--json` events (`command_execution` status `declined`), not just the process exit code. These are routing and failure-handling tests, not a reviewer-quality evaluation.
 
 ## What is verified
 
@@ -167,7 +167,7 @@ vllmcode run pi host --dry-run
 OpenCode defaults to **32,768 output tokens**, including reasoning. For smaller known context windows, the default is reduced to one quarter of the context. Choose a larger budget explicitly when your model needs more reasoning time:
 
 ```bash
-vllmcode run opencode sn4622130540 --max-output-tokens 65536
+vllmcode run opencode yourserverip --max-output-tokens 65536
 ```
 
 For OpenCode, this option sets both the model output limit and the child process's `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX` (otherwise OpenCode 1.17.4 separately caps generation at 32,000). Automatic compaction is enabled, with `compaction.reserved` matching the selected output budget; other compaction preferences are preserved. With a 262,144-token context, the default leaves 229,376 tokens before the output reserve; a 65,536 budget leaves 196,608. Actual compaction timing depends on OpenCode's accounting. These are generation ceilings, not minimum response lengths or separately detected model output limits.
@@ -176,7 +176,7 @@ Explicit budgets must be positive integers smaller than the advertised context, 
 
 ```bash
 # Runs discovery and inference checks, prints redacted config, does not launch:
-vllmcode run codex sn4622130540 --dry-run
+vllmcode run codex yourserverip --dry-run
 
 # Longer timeouts for remote or busy servers:
 vllmcode run claude host --timeout 5 --probe-timeout 120
@@ -186,9 +186,9 @@ python3 -m unittest discover -s tests -v
 
 Tests use local HTTP fixtures and a fake executable to exercise discovery, authentication, capability failures, model ambiguity, redaction, redirects, argument forwarding, and process exit codes. Running them requires permission to bind loopback sockets. They do not require GPUs. An additional streaming integration test runs the installed Pi CLI against a local HTTP fixture when Pi is on PATH; otherwise it is skipped.
 
-Live validation on September 6, 2026: `sn4622130540:8000`, vLLM 0.28.0, model `Inferact/Qwen3.8-27B-NVFP4`, advertised context 262,144. Codex 0.153.0, Claude Code 2.1.251, and OpenCode 1.17.4 each passed the launcher's probes and an isolated noninteractive reply-only run. Both streaming agent responses and the nonstreaming tool probes worked. This server did not expose `/server_info`; literal flag verification was unavailable. These were smoke tests, not a full coding benchmark or a multi-turn tool-execution test.
+Live validation on September 6, 2026: `yourserverip:8000`, vLLM 0.28.0, model `Inferact/Qwen3.8-27B-NVFP4`, advertised context 262,144. Codex 0.153.0, Claude Code 2.1.251, and OpenCode 1.17.4 each passed the launcher's probes and an isolated noninteractive reply-only run. Both streaming agent responses and the nonstreaming tool probes worked. This server did not expose `/server_info`; literal flag verification was unavailable. These were smoke tests, not a full coding benchmark or a multi-turn tool-execution test.
 
-Pi live validation on September 7, 2026: Pi 0.85.1 against `sn4622130540:8000`, model `Inferact/Qwen3.8-27B-NVFP4`, advertised context 262,144, with medium effort and a 32,768-token output budget. Discovery and reasoning/tool probes passed. Two isolated noninteractive runs exited successfully: a streamed text response and a complete `read` tool round trip that returned the expected value from a temporary fixture file. User extensions and context files were disabled for these smoke tests; interactive UI behavior was not tested. Startup flags were not exposed, so verification covered observable behavior.
+Pi live validation on September 7, 2026: Pi 0.85.1 against `yourserverip:8000`, model `Inferact/Qwen3.8-27B-NVFP4`, advertised context 262,144, with medium effort and a 32,768-token output budget. Discovery and reasoning/tool probes passed. Two isolated noninteractive runs exited successfully: a streamed text response and a complete `read` tool round trip that returned the expected value from a temporary fixture file. User extensions and context files were disabled for these smoke tests; interactive UI behavior was not tested. Startup flags were not exposed, so verification covered observable behavior.
 
 If discovery fails, check VPN/DNS access, firewall rules, and whether vLLM binds an accessible interface. Short cluster hostnames must resolve on the machine running `vllmcode`; use its FQDN/IP or an existing SSH tunnel if needed.
 
