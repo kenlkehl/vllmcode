@@ -7,10 +7,10 @@ pipx install .
 # Or: uv tool install .
 # Or, without installing: ./bin/vllmcode run codex sn4622130540
 
-vllmcode run codex sn4622130540
-vllmcode run claude http://sn4622130540:8000/v1
-vllmcode run opencode sn4622130540:8000
-vllmcode run pi sn4622130540:8000
+vllmcode run codex yourserverip
+vllmcode run claude http://yourserverip:8000/v1
+vllmcode run opencode yourserverip:8000
+vllmcode run pi yourserverip:8000
 ```
 
 You can also run `python3 -m vllmcode` from this directory. The launcher prints the chosen endpoint and model ID, checks compatibility, and replaces itself with the harness, preserving terminal input, signals, working directory, and exit status. It does not edit your harness configuration files or start/restart vLLM.
